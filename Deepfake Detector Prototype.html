@@ -1,0 +1,229 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Deepfake Detector Prototype</title>
+<style>
+:root{--bg:#f3f6fb;--card:#fff;--edge:#d5deec;--ink:#0d1730;--mute:#5b6b8c;--cy:#0891b2;--red:#d6213a;--ok:#0f9d6b;--track:#e3e9f4;
+box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#070d1c;--card:#0f1a33;--edge:#1e2f55;--ink:#f1f5ff;--mute:#9fb0cf;--cy:#22d3ee;--red:#ff3b4e;--ok:#34d399;--track:#1a2748}}
+:root[data-theme="dark"]{--bg:#070d1c;--card:#0f1a33;--edge:#1e2f55;--ink:#f1f5ff;--mute:#9fb0cf;--cy:#22d3ee;--red:#ff3b4e;--ok:#34d399;--track:#1a2748}
+html{scroll-padding-top:env(safe-area-inset-top,0px)}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.5 Calibri,"Segoe UI",Arial,sans-serif}
+main{max-width:980px;margin:0 auto;padding:28px 18px 48px}
+h1{font-size:clamp(28px,5vw,42px);margin:0 0 6px;line-height:1.1}
+.sub{color:var(--mute);margin:0 0 22px;max-width:60ch}
+.card{background:var(--card);border:1px solid var(--edge);border-radius:12px;padding:18px}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:16px}
+@media(max-width:760px){.grid{grid-template-columns:1fr}}
+#drop{border:2px dashed var(--edge);border-radius:12px;padding:30px 16px;text-align:center;cursor:pointer;transition:border-color .15s,background .15s}
+#drop.over,#drop:focus-visible{border-color:var(--cy);outline:none;background:color-mix(in srgb,var(--cy) 8%,transparent)}
+#drop b{display:block;font-size:18px;margin-bottom:4px}
+#drop span{color:var(--mute);font-size:14px}
+video,img.prev{width:100%;max-height:260px;border-radius:8px;background:#000;object-fit:contain;display:none}
+button{font:inherit;font-weight:700;border:0;border-radius:8px;padding:11px 20px;background:var(--cy);color:#04141c;cursor:pointer}
+button:disabled{opacity:.45;cursor:not-allowed}
+button:focus-visible{outline:3px solid var(--ink);outline-offset:2px}
+.row{display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin-top:14px}
+#status{color:var(--mute);font-size:14px}
+.meter{margin:14px 0}
+.meter .t{display:flex;justify-content:space-between;gap:8px;font-weight:700}
+.meter .t small{color:var(--mute);font-weight:400}
+.bar{height:10px;border-radius:5px;background:var(--track);margin-top:6px;overflow:hidden}
+.bar i{display:block;height:100%;width:0;background:var(--cy);border-radius:5px;transition:width .6s}
+#verdict{font-size:clamp(30px,6vw,44px);font-weight:800;margin:0;line-height:1.1}
+.fake{color:var(--red)}.real{color:var(--ok)}.sus{color:#d98a00}
+ul{margin:8px 0 0;padding-left:20px}li{margin:4px 0}
+canvas{width:100%;height:150px;display:block}
+.note{color:var(--mute);font-size:13px;margin-top:22px;max-width:75ch}
+.hidden{display:none}
+h2{font-size:18px;margin:0 0 6px}
+</style>
+</head>
+<body>
+<main>
+<h1>Deepfake detector prototype</h1>
+<p class="sub">Upload a video or image. The page checks the video frames, the audio and the file details in your browser, combines the three scores and gives a verdict. Nothing is uploaded anywhere.</p>
+
+<div class="card">
+  <div id="drop" tabindex="0" role="button" aria-label="Choose a video or image file">
+    <b id="dropTitle">Drop a video or image here</b>
+    <span>or click to choose a file (MP4, WebM, MOV, JPG, PNG)</span>
+  </div>
+  <input id="file" type="file" accept="video/*,image/*" class="hidden">
+  <div style="margin-top:14px"><video id="vid" controls playsinline muted></video><img id="img" class="prev" alt="Selected image"></div>
+  <div class="row"><button id="go" disabled>Analyze file</button><span id="status">No file selected yet.</span></div>
+</div>
+
+<div id="out" class="hidden">
+  <div class="grid">
+    <div class="card">
+      <h2>Result</h2>
+      <p id="verdict"></p>
+      <p id="conf" style="margin:4px 0 12px;color:var(--mute)"></p>
+      <b>Why it was flagged</b>
+      <ul id="why"></ul>
+    </div>
+    <div class="card">
+      <h2>Score per signal</h2>
+      <div id="meters"></div>
+    </div>
+  </div>
+  <div class="card" style="margin-top:16px" id="chartCard">
+    <h2>Frame by frame</h2>
+    <canvas id="chart" role="img" aria-label="Bar chart of how unusual each sampled frame looks"></canvas>
+    <div style="color:var(--mute);font-size:13px">Taller red bars are frames that look unusual compared with the rest of the clip.</div>
+  </div>
+</div>
+
+<p class="note">This is a student prototype. It uses simple signal checks (sharpness changes, sudden frame jumps, audio smoothness, file bitrate), not a trained CNN or transformer, so treat the verdict as a demo of the pipeline and not as proof. Real compressed or filtered videos can score as suspicious too. The full version would plug trained models into the same three signal slots.</p>
+</main>
+
+<script>
+const $=id=>document.getElementById(id);
+const clamp=(x,a=0,b=1)=>Math.min(b,Math.max(a,x));
+const sig=x=>1/(1+Math.exp(-x));
+const mean=a=>a.reduce((s,v)=>s+v,0)/(a.length||1);
+const std=a=>{const m=mean(a);return Math.sqrt(mean(a.map(v=>(v-m)**2)))};
+let file=null,url=null;
+
+const drop=$("drop"),inp=$("file");
+drop.onclick=()=>inp.click();
+drop.onkeydown=e=>{if(e.key==="Enter"||e.key===" "){e.preventDefault();inp.click()}};
+["dragover","dragenter"].forEach(ev=>drop.addEventListener(ev,e=>{e.preventDefault();drop.classList.add("over")}));
+["dragleave","drop"].forEach(ev=>drop.addEventListener(ev,e=>{e.preventDefault();drop.classList.remove("over")}));
+drop.addEventListener("drop",e=>{if(e.dataTransfer.files[0])pick(e.dataTransfer.files[0])});
+inp.onchange=()=>{if(inp.files[0])pick(inp.files[0])};
+
+function pick(f){
+  if(!/^(video|image)\//.test(f.type)){$("status").textContent="That file type is not supported. Choose a video or an image.";return}
+  file=f; if(url)URL.revokeObjectURL(url); url=URL.createObjectURL(f);
+  const isV=f.type.startsWith("video/");
+  $("vid").style.display=isV?"block":"none"; $("img").style.display=isV?"none":"block";
+  if(isV)$("vid").src=url; else $("img").src=url;
+  $("dropTitle").textContent=f.name;
+  $("go").disabled=false; $("out").classList.add("hidden");
+  $("status").textContent=(f.size/1048576).toFixed(1)+" MB ready.";
+}
+
+function loadVideo(){return new Promise((res,rej)=>{const v=document.createElement("video");v.muted=true;v.playsInline=true;v.preload="auto";v.src=url;v.onloadeddata=()=>res(v);v.onerror=()=>rej(new Error("The browser could not read this video."))})}
+function loadImage(){return new Promise((res,rej)=>{const i=new Image();i.onload=()=>res(i);i.onerror=()=>rej(new Error("The browser could not read this image."));i.src=url})}
+const seek=(v,t)=>new Promise(r=>{v.onseeked=()=>r();v.currentTime=t});
+
+function frameStats(ctx,W,H,prev){
+  const d=ctx.getImageData(0,0,W,H).data,g=new Float32Array(W*H);
+  for(let i=0;i<W*H;i++)g[i]=.299*d[i*4]+.587*d[i*4+1]+.114*d[i*4+2];
+  // sharpness = variance of Laplacian
+  const lap=[];
+  for(let y=1;y<H-1;y++)for(let x=1;x<W-1;x++){const i=y*W+x;lap.push(4*g[i]-g[i-1]-g[i+1]-g[i-W]-g[i+W])}
+  const sharp=std(lap)**2;
+  let diff=0; if(prev){for(let i=0;i<g.length;i+=3)diff+=Math.abs(g[i]-prev[i]);diff/=g.length/3}
+  return{g,sharp,diff};
+}
+
+async function visualSignal(){
+  const W=192,H=108,c=document.createElement("canvas");c.width=W;c.height=H;
+  const ctx=c.getContext("2d",{willReadFrequently:true});
+  let times=[],sharps=[],diffs=[],prev=null,dur=0;
+  if(file.type.startsWith("video/")){
+    const v=await loadVideo();dur=v.duration||0;
+    const n=Math.max(6,Math.min(18,Math.round(dur*2)||6));
+    for(let k=0;k<n;k++){
+      const t=dur*(k+.5)/n; await seek(v,t);
+      ctx.drawImage(v,0,0,W,H);
+      const s=frameStats(ctx,W,H,prev);prev=s.g;
+      times.push(t);sharps.push(s.sharp);diffs.push(k?s.diff:0);
+    }
+  }else{
+    const im=await loadImage();ctx.drawImage(im,0,0,W,H);
+    const s=frameStats(ctx,W,H,null);times=[0];sharps.push(s.sharp);diffs=[0];
+    // image: compare sharpness of 4 quadrants instead of time
+    const q=[];for(const[x,y]of[[0,0],[W/2,0],[0,H/2],[W/2,H/2]]){const d=ctx.getImageData(x,y,W/2,H/2);const g=[];for(let i=0;i<d.data.length;i+=4)g.push(.299*d.data[i]+.587*d.data[i+1]+.114*d.data[i+2]);const l=[];const w=W/2;for(let i=w+1;i<g.length-w-1;i++)l.push(4*g[i]-g[i-1]-g[i+1]-g[i-w]-g[i+w]);q.push(std(l)**2)}
+    sharps=q;times=q.map((_,i)=>i);diffs=q.map(()=>0);
+  }
+  const ms=mean(sharps)||1,cv=std(sharps)/ms;
+  const dm=mean(diffs),ds=std(diffs);
+  const spikes=diffs.filter(d=>ds>0&&d>dm+1.5*ds).length/diffs.length;
+  const perFrame=sharps.map((s,i)=>clamp(Math.abs(s-ms)/(ms*1.2)*.6+(ds>0?clamp((diffs[i]-dm)/(ds*3)+.2,0,1)*.4:0)));
+  const score=clamp(sig((cv-.45)*4)*.7+clamp(spikes*3)*.3);
+  return{score,cv,spikes,perFrame,times,dur};
+}
+
+async function audioSignal(){
+  if(!file.type.startsWith("video/"))return{score:null};
+  try{
+    const buf=await file.arrayBuffer();
+    const AC=window.AudioContext||window.webkitAudioContext;const ac=new AC();
+    const a=await ac.decodeAudioData(buf.slice(0));ac.close();
+    const x=a.getChannelData(0),win=2048,hf=[];
+    for(let s=0;s+win<x.length;s+=win*4){
+      let e=0,de=0;for(let i=s+1;i<s+win;i++){e+=x[i]*x[i];const d=x[i]-x[i-1];de+=d*d}
+      if(e>1e-5)hf.push(de/e);
+    }
+    if(hf.length<4)return{score:.5,note:"Audio is almost silent."};
+    const m=mean(hf),cv=std(hf)/m;
+    const smooth=clamp((.55-m)/.55);           // very low high-frequency energy
+    const uniform=clamp(1-cv/1.2);              // too consistent over time
+    return{score:clamp(smooth*.5+uniform*.5+.1),m,cv};
+  }catch(e){return{score:null,noAudio:true}}
+}
+
+function metaSignal(dur){
+  const kbps=dur?file.size*8/dur/1000:null;
+  let s=.3,notes=[];
+  if(kbps!==null&&kbps<400){s+=.3;notes.push("Very low bitrate ("+Math.round(kbps)+" kbps) hides editing traces.")}
+  if(!file.lastModified||file.lastModified<=0){s+=.1}
+  if(/whatsapp|screen|record|download|ai|fake|gen/i.test(file.name)){s+=.15;notes.push("File name suggests a re-saved or generated file.")}
+  return{score:clamp(s),notes,kbps};
+}
+
+function chart(sc,times){
+  const c=$("chart"),dpr=devicePixelRatio||1,w=c.clientWidth,h=150;
+  c.width=w*dpr;c.height=h*dpr;const x=c.getContext("2d");x.scale(dpr,dpr);x.clearRect(0,0,w,h);
+  const st=getComputedStyle(document.documentElement),red=st.getPropertyValue("--red").trim(),cy=st.getPropertyValue("--cy").trim(),mu=st.getPropertyValue("--mute").trim();
+  const n=sc.length,bw=(w-20)/n;
+  sc.forEach((v,i)=>{const bh=Math.max(3,v*(h-34));x.fillStyle=v>.55?red:cy;x.fillRect(10+i*bw+bw*.15,h-22-bh,bw*.7,bh)});
+  x.fillStyle=mu;x.font="11px Calibri,Arial";x.textAlign="center";
+  const step=Math.ceil(n/8);
+  sc.forEach((_,i)=>{if(i%step===0)x.fillText(times[i]!==undefined&&times.length>1?times[i].toFixed(1)+"s":"",10+i*bw+bw/2,h-6)});
+}
+
+$("go").onclick=async()=>{
+  const btn=$("go");btn.disabled=true;const st=$("status");
+  try{
+    st.textContent="Reading frames...";
+    const V=await visualSignal();
+    st.textContent="Checking audio...";
+    const A=await audioSignal();
+    st.textContent="Checking file details...";
+    const M=metaSignal(V.dur);
+    const sig3=[["Visual","Sharpness and frame jumps",V.score],["Audio","Voice smoothness",A.score],["File details","Bitrate and name",M.score]].filter(s=>s[2]!==null);
+    // attention-style fusion: softmax weights favour the strongest signals
+    const ws=sig3.map(s=>Math.exp(s[2]*3)),wsum=ws.reduce((a,b)=>a+b,0);
+    const final=sig3.reduce((a,s,i)=>a+s[2]*ws[i]/wsum,0);
+    $("meters").innerHTML=sig3.map((s,i)=>`<div class="meter"><div class="t"><span>${s[0]} <small>${s[1]}</small></span><span>${s[2].toFixed(2)}</span></div><div class="bar"><i data-w="${s[2]*100}"></i></div><small style="color:var(--mute)">Fusion weight ${(ws[i]/wsum*100).toFixed(0)}%</small></div>`).join("")+(A.score===null?`<small style="color:var(--mute)">${file.type.startsWith("image/")?"Images have no audio, so that signal is skipped.":"No readable audio track, so that signal is skipped."}</small>`:"");
+    requestAnimationFrame(()=>document.querySelectorAll(".bar i").forEach(b=>b.style.width=b.dataset.w+"%"));
+    const v=$("verdict");
+    const lab=final>=.6?["Likely deepfake","fake"]:final>=.45?["Suspicious","sus"]:["Likely real","real"];
+    v.textContent=lab[0];v.className=lab[1];
+    $("conf").textContent="Fusion score "+final.toFixed(2)+" out of 1.00";
+    const why=[];
+    if(V.cv>.45)why.push("Sharpness changes a lot between frames (variation "+V.cv.toFixed(2)+"), which can happen when a face is blended onto a video.");
+    if(V.spikes>0)why.push("Sudden jumps between neighbouring frames in "+Math.round(V.spikes*100)+"% of the clip.");
+    if(A.score!==null&&A.score>.55)why.push("The voice is smoother and more uniform than normal speech.");
+    M.notes.forEach(n=>why.push(n));
+    if(!why.length)why.push("No strong warning signs from the three checks.");
+    $("why").innerHTML=why.map(w=>`<li>${w}</li>`).join("");
+    $("out").classList.remove("hidden");
+    $("chartCard").style.display=V.perFrame.length>1?"block":"none";
+    if(V.perFrame.length>1)chart(V.perFrame,V.times);
+    st.textContent="Done.";
+    $("out").scrollIntoView({behavior:"smooth",block:"start"});
+  }catch(e){st.textContent=e.message||"Something went wrong. Try a different file.";}
+  btn.disabled=false;
+};
+</script>
+</body>
+</html>
